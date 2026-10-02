@@ -1225,6 +1225,258 @@ async function call(method, url, body) {
     db2.close();
   }
 
+  console.log('18) 入展素材替代：整次校验、只读预览、替换件数最少择优、事务内确认与全部拒绝码');
+  {
+    // 自建素材，避免依赖演示数据：
+    //  badX 无授权（其链上任何节点都不合格）；goodY/goodZ 各带全授权闭包
+    const mBadX = await call('POST', '/api/materials', { title: '替代测试-坏成片X', kind: 'video' });
+    const mGoodY = await call('POST', '/api/materials', { title: '替代测试-好成片Y', kind: 'video' });
+    const mGoodZ = await call('POST', '/api/materials', { title: '替代测试-好成片Z', kind: 'video' });
+    const mUpU = await call('POST', '/api/materials', { title: '替代测试-Y上游U', kind: 'audio' });
+    const badX = mBadX.data.id, goodY = mGoodY.data.id, goodZ = mGoodZ.data.id, upU = mUpU.data.id;
+    await call('POST', `/api/materials/${goodY}/sources`, { sourceMaterialId: upU, relation: '配乐' });
+    for (const mid of [goodY, upU, goodZ]) {
+      await call('POST', `/api/materials/${mid}/authorizations`, {
+        media: '*', region: '*', validFrom: '2000-01-01', validTo: '2035-12-31',
+      });
+    }
+    const pkg = await call('POST', '/api/packages', {
+      name: '替代测试-秋季包', medium: '屏幕放映', region: '中国大陆',
+      useFrom: '2026-10-01', useTo: '2026-11-30', materialIds: [badX],
+    });
+    const pid = pkg.data.id;
+
+    // 18.1 输入整次拒绝：候选含原素材自身、原素材重复、原素材非包内、候选不存在、空候选、候选重复
+    const bad1 = await call('POST', `/api/packages/${pid}/replacements/preview`, {
+      replacements: [
+        { materialId: badX, candidateIds: [badX] },
+        { materialId: badX, candidateIds: [goodY] },
+        { materialId: 999999, candidateIds: [goodY] },
+        { materialId: badX, candidateIds: [999998] },
+        { materialId: badX, candidateIds: [] },
+        { materialId: badX, candidateIds: [goodY, goodY] },
+      ],
+    });
+    ok(bad1.status === 400 && bad1.data.details && bad1.data.details.code === 'INVALID_REPLACEMENTS'
+      && bad1.data.details.errors.length === 6
+      && bad1.data.details.errors[0].messages.some((m) => m.includes('与该项原素材相同'))
+      && bad1.data.details.errors[1].messages.some((m) => m.includes('重复指定'))
+      && bad1.data.details.errors[2].messages.some((m) => m.includes('不是该包当前清单'))
+      && bad1.data.details.errors[3].messages.some((m) => m.includes('不存在'))
+      && bad1.data.details.errors[4].messages.some((m) => m.includes('至少'))
+      && bad1.data.details.errors[5].messages.some((m) => m.includes('重复')),
+      '非法替代指定整次拒绝（400 INVALID_REPLACEMENTS，逐项列出自身/重复/非包内/不存在/空），实际: ' + JSON.stringify(bad1.data.details && bad1.data.details.code));
+
+    // 18.2 条目超过 6 项 / 候选超过 8 项整次拒绝
+    const seven = await call('POST', `/api/packages/${pid}/replacements/preview`, {
+      replacements: Array.from({ length: 7 }, () => ({ materialId: badX, candidateIds: [goodY] })),
+    });
+    ok(seven.status === 400 && seven.data.details.code === 'INVALID_REPLACEMENTS',
+      '超过 6 项替代指定整次拒绝');
+    const nineC = await call('POST', `/api/packages/${pid}/replacements/preview`, {
+      replacements: [{ materialId: badX, candidateIds: [goodY, goodY, goodY, goodY, goodY, goodY, goodY, goodY, goodY] }],
+    });
+    ok(nineC.status === 400 && nineC.data.details.code === 'INVALID_REPLACEMENTS'
+      && nineC.data.details.errors[0].messages.some((m) => m.includes('至多') && m.includes('8 件')),
+      '单项候选超过 8 件整次拒绝');
+    // 缺少 replacements 字段
+    const noField = await call('POST', `/api/packages/${pid}/replacements/preview`, {});
+    ok(noField.status === 400 && noField.data.details.code === 'INVALID_REPLACEMENTS',
+      '缺少 replacements 字段被拒');
+    // 只读：被拒后包清单未变
+    const stillBadX = (await call('GET', `/api/packages/${pid}`)).data.items.map((i) => i.id);
+    ok(JSON.stringify(stillBadX) === JSON.stringify([badX]), '整次拒绝不修改包清单');
+
+    // 18.3 无候选可解时返回当前清单逐站缺口、无令牌
+    const noSol = await call('POST', `/api/packages/${pid}/replacements/preview`, { replacements: [] });
+    ok(noSol.status === 200 && noSol.data.feasible === false
+      && noSol.data.finalMaterialIds === null && noSol.data.confirmToken === null
+      && noSol.data.stops.length === 1 && noSol.data.stops[0].eligible === false
+      && noSol.data.stops[0].failingNodes.some((n) => n.materialId === badX)
+      && noSol.data.listFingerprint && noSol.data.itineraryFingerprint
+      && noSol.data.basisVersion !== undefined && noSol.data.originalMaterialIds.join() === String(badX),
+      '无解时返回当前清单逐站缺口、依据版本与原清单/行程指纹，且不修改包');
+
+    // 18.4 可行预览：替换件数、最终清单、替换明细、逐站结果、令牌
+    const prev = await call('POST', `/api/packages/${pid}/replacements/preview`, {
+      replacements: [{ materialId: badX, candidateIds: [goodY, goodZ] }],
+    });
+    ok(prev.status === 200 && prev.data.feasible === true
+      && prev.data.replacedCount === 1
+      && prev.data.finalMaterialIds.join() === String(goodY)
+      && prev.data.replacementDetails.length === 1
+      && prev.data.replacementDetails[0].selectedOption === 1
+      && prev.data.replacementDetails[0].selectedMaterialId === goodY
+      && prev.data.replacementDetails[0].replaced === true
+      && prev.data.stops.every((s) => s.eligible)
+      && prev.data.confirmToken && prev.data.confirmToken.finalMaterialIds.join() === String(goodY)
+      && prev.data.stats.enumeratedPlans === 3,
+      '预览择优：两候选均合格时替换 1 件并选编号 1，返回明细/逐站/令牌（枚举 3 个方案）');
+
+    // 18.5 缺令牌确认被拒
+    const noTok = await call('POST', `/api/packages/${pid}/replacements/apply`, {});
+    ok(noTok.status === 400 && noTok.data.details.code === 'TOKEN_REQUIRED', '缺少 confirmToken 被拒（400）');
+
+    // 18.6 依据版本过期：预览后新增授权（basis+1）再确认 -> STALE_BASIS，不改包
+    await call('POST', `/api/materials/${upU}/authorizations`, {
+      media: '纸本', region: '某地区', validFrom: '2001-01-01', validTo: '2001-12-31',
+    });
+    const stale = await call('POST', `/api/packages/${pid}/replacements/apply`, { confirmToken: prev.data.confirmToken });
+    ok(stale.status === 409 && stale.data.details.code === 'STALE_BASIS'
+      && stale.data.details.clientBasis < stale.data.details.currentBasis,
+      '预览后授权变更导致确认过期：409 STALE_BASIS');
+    ok((await call('GET', `/api/packages/${pid}`)).data.items.map((i) => i.id).join() === String(badX),
+      '过期拒绝不部分修改包');
+
+    // 18.7 重新预览后改展期 -> ITINERARY_CHANGED；行程恢复后重预览，令牌先做篡改校验再正式确认
+    const prev2 = await call('POST', `/api/packages/${pid}/replacements/preview`, {
+      replacements: [{ materialId: badX, candidateIds: [goodY] }],
+    });
+    await call('PATCH', `/api/packages/${pid}`, {
+      name: '替代测试-秋季包', medium: '屏幕放映', region: '中国大陆',
+      useFrom: '2026-09-15', useTo: '2026-11-30', materialIds: [badX],
+    });
+    const itinGone = await call('POST', `/api/packages/${pid}/replacements/apply`, { confirmToken: prev2.data.confirmToken });
+    ok(itinGone.status === 409 && itinGone.data.details.code === 'ITINERARY_CHANGED',
+      '预览后行程变更：409 ITINERARY_CHANGED');
+    await call('PATCH', `/api/packages/${pid}`, {
+      name: '替代测试-秋季包', medium: '屏幕放映', region: '中国大陆',
+      useFrom: '2026-10-01', useTo: '2026-11-30', materialIds: [badX],
+    });
+    const prev3 = await call('POST', `/api/packages/${pid}/replacements/preview`, {
+      replacements: [{ materialId: badX, candidateIds: [goodY] }],
+    });
+
+    // 18.8 篡改令牌（清单/候选/选中编号）-> INPUT_MISMATCH（在应用前，清单仍为原清单）
+    const tampered = JSON.parse(JSON.stringify(prev3.data.confirmToken));
+    tampered.finalMaterialIds = [badX];
+    const tam = await call('POST', `/api/packages/${pid}/replacements/apply`, { confirmToken: tampered });
+    ok(tam.status === 422 && tam.data.details.code === 'INPUT_MISMATCH',
+      '篡改令牌最终清单被拒：422 INPUT_MISMATCH');
+    const tampered2 = JSON.parse(JSON.stringify(prev3.data.confirmToken));
+    tampered2.entries[0].candidates = [999997];
+    const tam2 = await call('POST', `/api/packages/${pid}/replacements/apply`, { confirmToken: tampered2 });
+    ok(tam2.status === 422 && tam2.data.details.code === 'INPUT_MISMATCH',
+      '篡改令牌候选（指向不存在素材）被拒：422 INPUT_MISMATCH');
+    const tampered3 = JSON.parse(JSON.stringify(prev3.data.confirmToken));
+    tampered3.selection = [9];
+    const tam3 = await call('POST', `/api/packages/${pid}/replacements/apply`, { confirmToken: tampered3 });
+    ok(tam3.status === 422 && tam3.data.details.code === 'INPUT_MISMATCH',
+      '选中编号越界被拒：422 INPUT_MISMATCH');
+    // 各次拒绝后包清单仍是原清单，未被部分修改
+    ok((await call('GET', `/api/packages/${pid}`)).data.items.map((i) => i.id).join() === String(badX),
+      '篡改/越界拒绝均不修改包清单');
+
+    // 18.9 正式确认成功
+    const applied = await call('POST', `/api/packages/${pid}/replacements/apply`, { confirmToken: prev3.data.confirmToken });
+    ok(applied.status === 200 && applied.data.ok && applied.data.mutated === true
+      && applied.data.finalMaterialIds.join() === String(goodY)
+      && applied.data.replacedCount === 1
+      && applied.data.package.items.map((i) => i.id).join() === String(goodY)
+      && applied.data.package.status === 'draft'
+      && applied.data.stops.every((s) => s.eligible),
+      '确认成功：事务内核版本/指纹/输入、重算合格并应用最终清单，包仍待发布');
+
+    // 18.10 令牌一次性：清单已变后重复确认 -> PACKAGE_CHANGED
+    const reuse = await call('POST', `/api/packages/${pid}/replacements/apply`, { confirmToken: prev3.data.confirmToken });
+    ok(reuse.status === 409 && reuse.data.details.code === 'PACKAGE_CHANGED',
+      '确认后重复使用令牌被拒（PACKAGE_CHANGED）');
+
+    // 18.10 已发布 / 需复核包不可预览/确认（用既有已发布包 #1）
+    const pubPrev = await call('POST', '/api/packages/1/replacements/preview', { replacements: [] });
+    ok(pubPrev.status === 409 && pubPrev.data.details.code === 'NOT_DRAFT',
+      '已发布包替代预览被拒：409 NOT_DRAFT');
+    const pubApply = await call('POST', '/api/packages/1/replacements/apply', { confirmToken: {} });
+    ok(pubApply.status === 409 && pubApply.data.details.code === 'NOT_DRAFT',
+      '已发布包替代确认被拒：409 NOT_DRAFT');
+
+    // 18.11 多站：坏根两站均不合格；候选 goodY 全域授权 -> 两站均合格
+    const mpid = (await call('POST', '/api/packages', {
+      name: '替代测试-多站包', materialIds: [badX],
+      stops: [
+        { name: 'A站', media: '屏幕放映', region: '中国大陆', useFrom: '2026-03-01', useTo: '2026-03-20' },
+        { name: 'B站', media: '沉浸式投影', region: '中国香港', useFrom: '2026-05-01', useTo: '2026-05-20' },
+      ],
+    })).data.id;
+    const mprev = await call('POST', `/api/packages/${mpid}/replacements/preview`, {
+      replacements: [{ materialId: badX, candidateIds: [goodY] }],
+    });
+    ok(mprev.data.multiStop === true && mprev.data.feasible === true
+      && mprev.data.stopCount === 2
+      && mprev.data.stops.length === 2 && mprev.data.stops.every((s) => s.eligible)
+      && mprev.data.finalMaterialIds.join() === String(goodY),
+      '多站替代预览逐站重算：候选全域授权两站均合格');
+    const mapplied = await call('POST', `/api/packages/${mpid}/replacements/apply`, { confirmToken: mprev.data.confirmToken });
+    ok(mapplied.status === 200 && mapplied.data.package.multiStop === true
+      && mapplied.data.package.stopCount === 2
+      && mapplied.data.package.items.map((i) => i.id).join() === String(goodY),
+      '多站确认只改清单、行程两站完整保留');
+
+    // 18.12 多站：候选只覆盖一站 -> 无解，缺口按站给出
+    const oneStopMat = (await call('POST', '/api/materials', { title: '替代测试-仅A站授权', kind: 'video' })).data.id;
+    await call('POST', `/api/materials/${oneStopMat}/authorizations`, {
+      media: '屏幕放映', region: '中国大陆', validFrom: '2026-03-01', validTo: '2026-03-20',
+    });
+    const mpid2 = (await call('POST', '/api/packages', {
+      name: '替代测试-多站无解', materialIds: [badX],
+      stops: [
+        { name: 'A站', media: '屏幕放映', region: '中国大陆', useFrom: '2026-03-01', useTo: '2026-03-20' },
+        { name: 'B站', media: '沉浸式投影', region: '中国香港', useFrom: '2026-05-01', useTo: '2026-05-20' },
+      ],
+    })).data.id;
+    const mgap = await call('POST', `/api/packages/${mpid2}/replacements/preview`, {
+      replacements: [{ materialId: badX, candidateIds: [oneStopMat] }],
+    });
+    // 无解时按规约返回【当前清单】（badX，两站均无授权）的逐站缺口：
+    // 候选只能独自覆盖 A 站，不存在“从原素材及候选中各选一件且全站合格”的方案
+    ok(mgap.data.feasible === false && mgap.data.confirmToken === null
+      && mgap.data.stops.length === 2
+      && mgap.data.stops.every((s) => s.eligible === false)
+      && mgap.data.stops.every((s) => s.failingNodes.some((n) => n.materialId === badX))
+      && mgap.data.finalMaterialIds === null,
+      '多站候选仅覆盖 A 站：无解，返回当前清单两站缺口（badX），无令牌且不改包');
+
+    // 18.13 去重清单 + 替换件数最少：包 [badX, 第二坏根]，都可替到 goodY；
+    //       方案“只替一个”不可行（另一坏根仍在），最优为替 2 件、最终清单 [goodY]
+    const badW = (await call('POST', '/api/materials', { title: '替代测试-坏成片W', kind: 'video' })).data.id;
+    const did = (await call('POST', '/api/packages', {
+      name: '替代测试-去重包', medium: '屏幕放映', region: '中国大陆',
+      useFrom: '2026-10-01', useTo: '2026-11-30', materialIds: [badX, badW],
+    })).data.id;
+    const dprev = await call('POST', `/api/packages/${did}/replacements/preview`, {
+      replacements: [
+        { materialId: badX, candidateIds: [goodY] },
+        { materialId: badW, candidateIds: [goodY] },
+      ],
+    });
+    ok(dprev.data.feasible === true && dprev.data.replacedCount === 2
+      && dprev.data.finalMaterialIds.join() === String(goodY)
+      && dprev.data.stats.enumeratedPlans === 4
+      && dprev.data.replacementDetails.every((d) => d.replaced),
+      '两件坏根替到同一素材：按替换后去重清单 [goodY] 重算，替换件数 2（枚举 4 个方案）');
+
+    // 18.14 当前清单本就合格 + 空替代 -> feasible, replacedCount 0，最终清单不变
+    const already = (await call('POST', '/api/packages', {
+      name: '替代测试-本就合格', medium: '屏幕放映', region: '中国大陆',
+      useFrom: '2026-10-01', useTo: '2026-11-30', materialIds: [goodZ],
+    })).data.id;
+    const aprev = await call('POST', `/api/packages/${already}/replacements/preview`, { replacements: [] });
+    ok(aprev.data.feasible === true && aprev.data.replacedCount === 0
+      && aprev.data.currentEligible === true
+      && aprev.data.finalMaterialIds.join() === String(goodZ),
+      '当前清单合格且无替代指定：可行、替换 0 件、最终清单不变');
+
+    // 18.15 空包 / 包不存在
+    const empty = (await call('POST', '/api/packages', {
+      name: '替代测试-空包', medium: '屏幕放映', region: '中国大陆',
+      useFrom: '2026-10-01', useTo: '2026-11-30', materialIds: [],
+    })).data.id;
+    const eprev = await call('POST', `/api/packages/${empty}/replacements/preview`, { replacements: [] });
+    ok(eprev.status === 400 && eprev.data.details.code === 'EMPTY_PACKAGE', '空包拒绝预览：400 EMPTY_PACKAGE');
+    const nf = await call('POST', '/api/packages/999999/replacements/preview', { replacements: [] });
+    ok(nf.status === 404, '包不存在：404');
+  }
+
   console.log(`\n结果: ${pass} 通过, ${fail} 失败`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

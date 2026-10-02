@@ -19,6 +19,7 @@ const {
 const { previewChange, commitChange, ChangeError } = require('./changes');
 const { searchSchedule, applySchedule, ScheduleError } = require('./schedule');
 const { previewQuotes, QuoteError } = require('./quotes');
+const { previewReplacements, applyReplacements, ReplacementError } = require('./replacements');
 const keyring = require('./attest-keys');
 const { buildAttestation, buildAttestationFromSnapshot, UnsupportedSnapshotError } = require('./attest');
 
@@ -732,6 +733,30 @@ app.post('/api/packages/:id/quotes/preview', (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// ---------- 入展素材替代方案：只读预览 / 事务内确认（仅待发布包） ----------
+app.post('/api/packages/:id/replacements/preview', (req, res, next) => {
+  try {
+    const result = previewReplacements(db, Number(req.params.id), req.body || {});
+    res.json({
+      ok: true,
+      ...result,
+    });
+  } catch (e) { next(e); }
+});
+
+app.post('/api/packages/:id/replacements/apply', (req, res, next) => {
+  try {
+    const out = applyReplacements(db, Number(req.params.id), req.body || {});
+    res.status(200).json({
+      ok: true,
+      mutated: true,
+      message: `替代方案已应用：最终清单 ${out.finalMaterialIds.join(', ')}（替换 ${out.replacedCount} 件；已在同一事务内重算全站合格）。`,
+      ...out,
+      package: packageDTO(db.prepare('SELECT * FROM packages WHERE id=?').get(out.packageId), true),
+    });
+  } catch (e) { next(e); }
+});
+
 // ---------- 快照 ----------
 app.get('/api/snapshots/:id', (req, res, next) => {
   try {
@@ -858,7 +883,7 @@ app.post('/api/attestation-keys/rotate', (req, res, next) => {
 // ---------- 错误处理 ----------
 app.use((err, req, res, next) => {
   if (err instanceof HttpError || err instanceof ChangeError || err instanceof ScheduleError
-    || err instanceof QuoteError || err instanceof UnsupportedSnapshotError) {
+    || err instanceof QuoteError || err instanceof ReplacementError || err instanceof UnsupportedSnapshotError) {
     return res.status(err.status).json({ error: err.message, details: err.details });
   }
   if (err && err.code === 'SQLITE_CONSTRAINT_TRIGGER') {

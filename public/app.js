@@ -575,6 +575,15 @@ $('#quoteFormBtn').addEventListener('click', () => {
   openQuotePreview(b.packageId);
 });
 
+$('#replaceFormBtn').addEventListener('click', () => {
+  const b = readPkgForm();
+  if (!b.packageId) {
+    toast('请先「保存待发布包」，再做替代素材预览', true);
+    return;
+  }
+  openReplacementPreview(b.packageId);
+});
+
 async function openScheduleSearch(packageId) {
   // 始终以服务端当前包参数为准（展期天数取自包当前展期，无需信任表单）
   let pkg;
@@ -718,6 +727,7 @@ function renderPackages() {
           ${p.status === 'draft' ? `<button class="btn btn-small btn-primary" data-act="to-verify">去核验</button>` : ''}
           ${p.status === 'draft' && !p.multiStop ? `<button class="btn btn-small" data-act="schedule">档期搜索</button>` : ''}
           ${p.status !== 'published' ? `<button class="btn btn-small" data-act="quotes">授权报价预览</button>` : ''}
+          ${p.status === 'draft' ? `<button class="btn btn-small" data-act="replace">替代素材预览</button>` : ''}
           ${p.status === 'draft' && p.multiStop ? '<span class="small-muted" title="档期搜索仅适用于单站包">多站行程在上方逐站编排（不支持整包档期搜索）</span>' : ''}
           ${p.status === 'needs_review' ? `<button class="btn btn-small btn-primary" data-act="recheck">重新核验（人工复核）</button>` : ''}
           <button class="btn btn-small" data-act="snapshot">查看最新快照</button>
@@ -780,6 +790,8 @@ $('#packagesList').addEventListener('click', async (e) => {
       await openScheduleSearch(id);
     } else if (btn.dataset.act === 'quotes') {
       await openQuotePreview(id);
+    } else if (btn.dataset.act === 'replace') {
+      await openReplacementPreview(id);
     } else if (btn.dataset.act === 'del') {
       if (!confirm('删除该待发布包？')) return;
       await api('DELETE', `/api/packages/${id}`);
@@ -1159,6 +1171,178 @@ async function commitPreviewedChange(change, preview, sourceForm) {
       toast('提交被拒绝：' + errText(err), true);
     }
   }
+}
+
+// ---- 入展素材替代：只读预览 + 事务内确认（仅待发布包） ----
+function replacementRowHtml(pkg, items) {
+  const origOpts = ['<option value="">选择包内入展素材…</option>']
+    .concat(items.map((m) => `<option value="${m.id}">${esc(m.title)} #${m.id}</option>`))
+    .join('');
+  const candOpts = ['<option value="">选择现有素材…</option>']
+    .concat(state.materials.map((m) => `<option value="${m.id}">${esc(m.title)} #${m.id}</option>`))
+    .join('');
+  return `
+    <tr class="repl-row">
+      <td><select class="r-original">${origOpts}</select></td>
+      <td>
+        <select class="r-cand" multiple size="3" style="min-width:220px"></select>
+        <div class="small-muted">按住 Ctrl/⌘ 点选 1～8 件；编号即点选顺序</div>
+      </td>
+      <td><button type="button" class="btn btn-small btn-danger" data-act="del-repl">删</button></td>
+    </tr>`;
+}
+
+function addReplacementRow(pkg, items) {
+  const tbl = $('#replTable');
+  tbl.insertAdjacentHTML('beforeend', replacementRowHtml(pkg, items));
+  const tr = tbl.lastElementChild;
+  const cand = tr.querySelector('.r-cand');
+  // 候选项排除“该项原素材自身”
+  const refreshCands = () => {
+    const orig = Number(tr.querySelector('.r-original').value) || 0;
+    cand.innerHTML = ['<option value="">选择现有素材…</option>']
+      .concat(state.materials.filter((m) => m.id !== orig)
+        .map((m) => `<option value="${m.id}">${esc(m.title)} #${m.id}</option>`)).join('');
+  };
+  tr.querySelector('.r-original').addEventListener('change', refreshCands);
+  refreshCands();
+}
+
+function readReplacementRows() {
+  return $$('#replTable .repl-row').map((tr) => ({
+    materialId: Number(tr.querySelector('.r-original').value) || 0,
+    candidateIds: [...tr.querySelector('.r-cand').selectedOptions].map((o) => Number(o.value)).filter(Boolean),
+  })).filter((r) => r.materialId);
+}
+
+function replStopHtml(st) {
+  return `
+    <div class="stop-card ${st.eligible ? 'stop-ok' : 'stop-bad'}" style="margin-top:6px">
+      <div class="section-title">第 ${st.position + 1} 站：${esc(st.name)}
+        ${st.eligible ? '<span class="pill pill-ok">整站合格</span>' : `<span class="pill pill-bad">失格 ${st.failingNodes.length} 节点</span>`}
+        <span class="small-muted">${esc(st.medium)} / ${esc(st.region)}，${st.useFrom} → ${st.useTo}</span></div>
+      ${st.eligible ? `<div class="small-muted">来源闭包 ${st.nodeCount} 个节点全部由一份未撤销授权独自覆盖整段展期。</div>` : `
+        <table class="auth">
+          <tr><th>节点</th><th>失格原因</th><th>来源路径</th></tr>
+          ${st.failingNodes.map((n) => `
+            <tr>
+              <td>${esc(n.title)} <span class="small-muted">#${n.materialId}${n.isRoot ? '（入展品）' : ''}</span></td>
+              <td>${(n.reasonText || []).map((t) => `<span class="pill pill-bad">${esc(t)}</span>`).join(' ')}</td>
+              <td>${(n.paths || []).map((p) => '<div class="path">' + p.map((x) => esc(x.title)).join(' → ') + '</div>').join('')}</td>
+            </tr>`).join('')}
+        </table>`}
+    </div>`;
+}
+
+function renderReplacementResult(r, packageId) {
+  const box = $('#replResult');
+  const head = r.feasible
+    ? `<div class="verdict pass">✓ ${esc(r.message)}
+         <span class="sub">依据版本 ${r.basisVersion} ｜ 规则 ${r.rules.version} ｜ 枚举出 ${r.stats.enumeratedPlans} 个方案 ｜
+         最终去重清单 [${r.finalMaterialIds.join(', ')}] ｜ 预览只读，确认时事务内重验。</span></div>`
+    : `<div class="verdict fail">✗ 无全站合格的替代方案。下方为<b>当前清单</b>的逐站缺口（预览未写入任何数据，包未被修改）。
+         <span class="sub">依据版本 ${r.basisVersion} ｜ 规则 ${r.rules.version}</span></div>`;
+
+  const details = r.feasible ? `
+    <div class="section-title">替换明细（选中编号：0=原素材，1..k=候选；按原清单顺序）</div>
+    <table class="auth">
+      <tr><th>原素材</th><th>选中编号</th><th>最终采用</th><th>是否替换</th></tr>
+      ${r.replacementDetails.map((d) => `
+        <tr>
+          <td>${esc(d.originalTitle)} <span class="small-muted">#${d.originalMaterialId}</span></td>
+          <td><b>${d.selectedOption}</b></td>
+          <td>${esc(d.selectedTitle)} <span class="small-muted">#${d.selectedMaterialId}</span></td>
+          <td>${d.replaced ? '<span class="pill pill-warn">替换</span>' : '<span class="pill pill-ok">不变</span>'}</td>
+        </tr>`).join('')}
+    </table>` : '';
+
+  box.innerHTML = head + details + `<div style="margin-top:6px">${r.stops.map(replStopHtml).join('')}</div>`;
+
+  const foot = $('#modalFoot');
+  foot.innerHTML = '';
+  if (r.feasible) {
+    foot.innerHTML = `
+      <button class="btn" id="replClose">关闭</button>
+      <button class="btn btn-primary" id="replApply">确认应用所选清单（事务内重算，失格/过期则整单拒绝）</button>`;
+    $('#replClose').addEventListener('click', () => $('#modalBackdrop').classList.add('hidden'));
+    $('#replApply').addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try {
+        const out = await api('POST', `/api/packages/${packageId}/replacements/apply`, { confirmToken: r.confirmToken });
+        $('#modalBackdrop').classList.add('hidden');
+        await loadState();
+        toast(`已应用最终清单 [${out.finalMaterialIds.join(', ')}]，替换 ${out.replacedCount} 件`);
+      } catch (err) {
+        e.target.disabled = false;
+        toast('确认被拒绝：' + errText(err), true);
+      }
+    });
+  } else {
+    foot.innerHTML = `<button class="btn" id="replCloseGap">关闭</button>`;
+    $('#replCloseGap').addEventListener('click', () => $('#modalBackdrop').classList.add('hidden'));
+  }
+}
+
+async function openReplacementPreview(packageId) {
+  let pkg;
+  try {
+    pkg = await api('GET', `/api/packages/${packageId}`);
+  } catch (err) { toast(errText(err), true); return; }
+  if (pkg.status !== 'draft') {
+    toast('只有待发布包可以预览/确认替代素材；已发布或需复核包请使用「复制为待发布包」', true);
+    return;
+  }
+
+  const scopeLine = pkg.multiStop
+    ? `多站巡展 <b>${pkg.stopCount}</b> 站，整包共享素材 ${pkg.itemCount} 项；逐站重算，全站合格才可选`
+    : `媒介 ${esc(pkg.medium)} ｜ 地区 ${esc(pkg.region)} ｜ 使用期 ${pkg.useFrom} → ${pkg.useTo} ｜ 素材 ${pkg.itemCount} 项`;
+
+  $('#modalTitle').textContent = `替代素材预览：${pkg.name} #${pkg.id}`;
+  $('#modalBody').innerHTML = `
+    <div class="edit-banner"><span>${scopeLine}</span><span class="pill pill-neutral">待发布</span></div>
+    <div class="small-muted">
+      为至多 <b>6</b> 件入展素材分别指定 <b>1～8</b> 件<b>现有</b>候选替代素材；未指定的保持不变。
+      预览从每件原素材及其候选中恰选一件，按替换后的<b>去重</b>清单重算完整来源链与逐站授权：
+      先取替换件数最少者，再按最终清单升序、原清单顺序的选中编号打破并列。预览<b>只读</b>。
+    </div>
+    <table class="auth" id="replTable">
+      <tr><th style="width:220px">原素材（必须是包内入展素材）</th><th>候选替代素材（1～8 件，不能含自身）</th><th></th></tr>
+    </table>
+    <div class="pkg-actions" style="margin-top:6px">
+      <button type="button" class="btn btn-small" id="addReplBtn" ${pkg.items.length ? '' : 'disabled'}>＋ 为一件原素材指定候选</button>
+      <button type="button" class="btn btn-primary btn-small" id="runReplBtn">预览最优替代方案（只读）</button>
+    </div>
+    <div id="replResult" class="schedule-result" style="margin-top:10px"></div>`;
+  const foot = $('#modalFoot');
+  foot.classList.remove('hidden');
+  foot.innerHTML = `<button class="btn" id="replCancel">关闭</button>`;
+  $('#replCancel').addEventListener('click', () => $('#modalBackdrop').classList.add('hidden'));
+  $('#modalBackdrop').classList.remove('hidden');
+
+  addReplacementRow(pkg, pkg.items);
+  $('#addReplBtn').addEventListener('click', () => {
+    if ($$('#replTable .repl-row').length >= 6) { toast('至多为 6 件原素材指定替代', true); return; }
+    addReplacementRow(pkg, pkg.items);
+  });
+  $('#replTable').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-act="del-repl"]');
+    if (btn) btn.closest('.repl-row').remove();
+  });
+  $('#runReplBtn').addEventListener('click', async () => {
+    const box = $('#replResult');
+    box.innerHTML = '<div class="small-muted">求解中…</div>';
+    try {
+      const r = await api('POST', `/api/packages/${packageId}/replacements/preview`, { replacements: readReplacementRows() });
+      renderReplacementResult(r, packageId);
+    } catch (err) {
+      const detail = err.details && Array.isArray(err.details.errors)
+        ? err.details.errors.map((x) => `第 ${x.index + 1} 项：${x.messages.join('；')}`).join('<br/>')
+        : '';
+      box.innerHTML = `<div class="errorline">${esc(errText(err))}${detail ? `<br/>${detail}` : ''}</div>`;
+      $('#modalFoot').innerHTML = `<button class="btn" id="replCancel2">关闭</button>`;
+      $('#replCancel2').addEventListener('click', () => $('#modalBackdrop').classList.add('hidden'));
+    }
+  });
 }
 
 loadState().catch((e) => toast('初始化失败：' + e.message, true));

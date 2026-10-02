@@ -1,0 +1,40 @@
+{
+  "keys": [
+    {
+      "kid": "ed25519-7d99225b6b4857400722bb39976de458",
+      "algorithm": "Ed25519",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA2/3ySVpJ3nz36TREXcs5IouvkJ39GrZ100kCKIwhqBQ=\n-----END PUBLIC KEY-----\n",
+      "activatedAt": "2026-10-02T06:49:29.261Z"
+    },
+    {
+      "kid": "ed25519-eff390b2df13ef88582d5fb5b8483171",
+      "algorithm": "Ed25519",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAKim+Oc02NmjPUcbmTFcrzP5gn9I5tmw5OobbCk9V/6w=\n-----END PUBLIC KEY-----\n",
+      "activatedAt": "2026-10-02T06:49:30.542Z"
+    },
+    {
+      "kid": "ed25519-ac609f546b8bad0a6ccae5b27a52d137",
+      "algorithm": "Ed25519",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAuimXnGO9HrUSlb2jzNe0KcOz3A9g78b70DIm2QgBLpE=\n-----END PUBLIC KEY-----\n",
+      "activatedAt": "2026-10-02T06:51:27.691Z"
+    },
+    {
+      "kid": "ed25519-915ee1a3e2c467e12584be3b50363d75",
+      "algorithm": "Ed25519",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA3sRTDfg18SOvFHb9UarDp/eRA89u1x8aabm/wwdGRpU=\n-----END PUBLIC KEY-----\n",
+      "activatedAt": "2026-10-02T06:53:03.381Z"
+    },
+    {
+      "kid": "ed25519-17e51a09a3fee622aa9d924c2ab4792a",
+      "algorithm": "Ed25519",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA6Ec/nvtJgr4FsE++U/lAXlNoy1SNdGlnFubyXWaB+lE=\n-----END PUBLIC KEY-----\n",
+      "activatedAt": "2026-10-02T06:54:21.363Z"
+    },
+    {
+      "kid": "ed25519-b035c19ad165984c3e7c04ea75576ffc",
+      "algorithm": "Ed25519",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAVDBWGl7HJY5d5xDXe6Zi1psjsFJL/fryhTPILyl0SlE=\n-----END PUBLIC KEY-----\n",
+      "activatedAt": "2026-10-02T07:03:53.413Z"
+    }
+  ]
+}
