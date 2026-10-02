@@ -19,6 +19,7 @@ const {
 const { previewChange, commitChange, ChangeError } = require('./changes');
 const { searchSchedule, applySchedule, ScheduleError } = require('./schedule');
 const { previewQuotes, QuoteError } = require('./quotes');
+const { previewSubstitutions, applySubstitutions, SubstituteError } = require('./substitutes');
 const keyring = require('./attest-keys');
 const { buildAttestation, buildAttestationFromSnapshot, UnsupportedSnapshotError } = require('./attest');
 
@@ -732,6 +733,35 @@ app.post('/api/packages/:id/quotes/preview', (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// ---------- 替代素材方案：只读预览 / 事务内确认（仅待发布包） ----------
+app.post('/api/packages/:id/substitutes/preview', (req, res, next) => {
+  try {
+    const result = previewSubstitutions(db, Number(req.params.id), req.body || {});
+    res.json({ ok: true, ...result });
+  } catch (e) { next(e); }
+});
+
+app.post('/api/packages/:id/substitutes/apply', (req, res, next) => {
+  try {
+    const out = applySubstitutions(db, Number(req.params.id), req.body || {});
+    const pkg = db.prepare('SELECT * FROM packages WHERE id=?').get(out.packageId);
+    res.json({
+      ok: true,
+      mutated: true,
+      message: out.replacementCount === 0
+        ? '已确认替代方案：方案为不替换任何素材，清单保持不变。'
+        : `替代方案已应用：替换 ${out.replacementCount} 件素材，已按替换后的去重清单在同一事务内重算并通过全站核验，包仍为待发布。`,
+      packageId: out.packageId,
+      basisVersion: out.basisVersion,
+      replacementCount: out.replacementCount,
+      finalMaterialIds: out.finalMaterialIds,
+      package: packageDTO(pkg, true),
+      result: out.result,
+      stops: out.stops,
+    });
+  } catch (e) { next(e); }
+});
+
 // ---------- 快照 ----------
 app.get('/api/snapshots/:id', (req, res, next) => {
   try {
@@ -858,7 +888,7 @@ app.post('/api/attestation-keys/rotate', (req, res, next) => {
 // ---------- 错误处理 ----------
 app.use((err, req, res, next) => {
   if (err instanceof HttpError || err instanceof ChangeError || err instanceof ScheduleError
-    || err instanceof QuoteError || err instanceof UnsupportedSnapshotError) {
+    || err instanceof QuoteError || err instanceof SubstituteError || err instanceof UnsupportedSnapshotError) {
     return res.status(err.status).json({ error: err.message, details: err.details });
   }
   if (err && err.code === 'SQLITE_CONSTRAINT_TRIGGER') {

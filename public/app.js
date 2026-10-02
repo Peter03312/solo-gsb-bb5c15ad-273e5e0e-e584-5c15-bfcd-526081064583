@@ -717,6 +717,7 @@ function renderPackages() {
           ${p.status === 'draft' ? `<button class="btn btn-small" data-act="edit">编辑</button>` : ''}
           ${p.status === 'draft' ? `<button class="btn btn-small btn-primary" data-act="to-verify">去核验</button>` : ''}
           ${p.status === 'draft' && !p.multiStop ? `<button class="btn btn-small" data-act="schedule">档期搜索</button>` : ''}
+          ${p.status === 'draft' ? `<button class="btn btn-small" data-act="substitutes">替代素材方案</button>` : ''}
           ${p.status !== 'published' ? `<button class="btn btn-small" data-act="quotes">授权报价预览</button>` : ''}
           ${p.status === 'draft' && p.multiStop ? '<span class="small-muted" title="档期搜索仅适用于单站包">多站行程在上方逐站编排（不支持整包档期搜索）</span>' : ''}
           ${p.status === 'needs_review' ? `<button class="btn btn-small btn-primary" data-act="recheck">重新核验（人工复核）</button>` : ''}
@@ -780,6 +781,8 @@ $('#packagesList').addEventListener('click', async (e) => {
       await openScheduleSearch(id);
     } else if (btn.dataset.act === 'quotes') {
       await openQuotePreview(id);
+    } else if (btn.dataset.act === 'substitutes') {
+      await openSubstitutePreview(id);
     } else if (btn.dataset.act === 'del') {
       if (!confirm('删除该待发布包？')) return;
       await api('DELETE', `/api/packages/${id}`);
@@ -1042,6 +1045,189 @@ function renderQuoteResult(r, packageId) {
     ${selRows}${unused}
     <div class="section-title">逐站逐节点覆盖依据</div>
     ${quoteCoverageRows(r)}`;
+}
+
+// ---- 替代素材方案：只读预览 + 事务确认（仅待发布包） ----
+function subRowHtml(pkg, entry = {}) {
+  const inPkg = state.materials.filter((m) => pkg.items.some((i) => i.id === m.id));
+  const originOpts = ['<option value="">选择包内原素材…</option>']
+    .concat(inPkg.map((m) =>
+      `<option value="${m.id}" ${entry.materialId === m.id ? 'selected' : ''}>${esc(m.title)} #${m.id}</option>`))
+    .join('');
+  return `
+    <div class="sub-row" style="border:1px solid #ddd;border-radius:6px;padding:6px;margin:6px 0">
+      <div class="pkg-actions">
+        原素材 <select class="s-origin" required>${originOpts}</select>
+        <button type="button" class="btn btn-small btn-danger" data-act="del-sub">删除本组</button>
+      </div>
+      <div class="small-muted">候选（1～8 件，编号即填写顺序；原素材本身为编号 0＝不替换）：</div>
+      <div class="s-cands pkg-actions" data-cands="${esc((entry.candidateIds || []).join(','))}">
+        ${(entry.candidateIds || []).map((cid) => subCandChip(cid)).join('')}
+        <select class="s-cand-pick">
+          <option value="">添加候选素材…</option>
+          ${state.materials.map((m) => `<option value="${m.id}">${esc(m.title)} #${m.id}</option>`).join('')}
+        </select>
+      </div>
+    </div>`;
+}
+
+function subCandChip(cid) {
+  const m = state.materials.find((x) => x.id === cid);
+  return `<span class="chip" data-cid="${cid}">#${cid} ${esc(m ? m.title : '（不存在）')}
+    <a href="#" data-act="del-cand" title="移除候选" style="margin-left:4px">✕</a></span>`;
+}
+
+function readSubEntries() {
+  return $$('#subBox .sub-row').map((row) => ({
+    materialId: Number(row.querySelector('.s-origin').value) || 0,
+    candidateIds: (row.querySelector('.s-cands').dataset.cands || '').split(',').filter(Boolean).map(Number),
+  })).filter((e) => e.materialId);
+}
+
+async function openSubstitutePreview(packageId) {
+  let pkg;
+  try {
+    pkg = await api('GET', `/api/packages/${packageId}`);
+  } catch (err) { toast(errText(err), true); return; }
+  if (pkg.status !== 'draft') { toast('仅待发布包可编排替代素材方案', true); return; }
+
+  const scopeLine = pkg.multiStop
+    ? `多站巡展 <b>${pkg.stopCount}</b> 站，整包共享素材 ${pkg.itemCount} 项；方案须<b>每一站</b>整段覆盖合格`
+    : `媒介 ${esc(pkg.medium)} ｜ 地区 ${esc(pkg.region)} ｜ 使用期 ${pkg.useFrom} → ${pkg.useTo} ｜ 素材 ${pkg.itemCount} 项`;
+
+  $('#modalTitle').textContent = `替代素材方案：${pkg.name} #${pkg.id}`;
+  $('#modalBody').innerHTML = `
+    <div class="edit-banner"><span>${scopeLine}</span><span class="pill pill-neutral">待发布</span></div>
+    <div class="small-muted">
+      至多为 <b>6</b> 件包内原素材分别指定 <b>1～8</b> 件现有候选；未指定的素材保持不变。
+      系统对每件原素材及其候选“恰选一件”的全部组合重算<b>完整来源链与逐站授权资格</b>，
+      仅全站合格方案可选，依次按 <b>替换件数最少 → 最终去重清单升序 → 原清单顺序的选中编号</b> 取最优。预览只读。
+    </div>
+    <div id="subBox"></div>
+    <div class="pkg-actions" style="margin-top:6px">
+      <button type="button" class="btn btn-small" id="addSubBtn">＋ 为一件原素材指定候选</button>
+      <button type="button" class="btn btn-primary btn-small" id="runSubBtn">枚举并预览最优方案（只读）</button>
+    </div>
+    <div id="subResult" class="schedule-result" style="margin-top:10px"></div>`;
+  const foot = $('#modalFoot');
+  foot.classList.remove('hidden');
+  foot.innerHTML = `<button class="btn" id="subClose">关闭</button>`;
+  $('#subClose').addEventListener('click', () => $('#modalBackdrop').classList.add('hidden'));
+  $('#modalBackdrop').classList.remove('hidden');
+
+  const box = $('#subBox');
+  const addRow = (entry) => box.insertAdjacentHTML('beforeend', subRowHtml(pkg, entry));
+  addRow();
+  $('#addSubBtn').addEventListener('click', () => {
+    if ($$('#subBox .sub-row').length >= 6) { toast('一次至多 6 组', true); return; }
+    addRow();
+  });
+  box.addEventListener('click', (e) => {
+    const delRow = e.target.closest('button[data-act="del-sub"]');
+    if (delRow) { delRow.closest('.sub-row').remove(); return; }
+    const delCand = e.target.closest('a[data-act="del-cand"]');
+    if (delCand) {
+      e.preventDefault();
+      const chip = delCand.closest('.chip');
+      const candsBox = chip.closest('.s-cands');
+      const cid = Number(chip.dataset.cid);
+      candsBox.dataset.cands = candsBox.dataset.cands.split(',').filter(Boolean)
+        .map(Number).filter((x) => x !== cid).join(',');
+      chip.remove();
+    }
+  });
+  box.addEventListener('change', (e) => {
+    const pick = e.target.closest('.s-cand-pick');
+    if (!pick || !pick.value) return;
+    const candsBox = pick.closest('.s-cands');
+    const cid = Number(pick.value);
+    const cands = candsBox.dataset.cands.split(',').filter(Boolean).map(Number);
+    if (cands.includes(cid)) { toast('同组候选不能重复', true); pick.value = ''; return; }
+    if (cands.length >= 8) { toast('每组至多 8 件候选', true); pick.value = ''; return; }
+    cands.push(cid);
+    candsBox.dataset.cands = cands.join(',');
+    pick.parentElement.insertAdjacentHTML('afterbegin', subCandChip(cid));
+    pick.value = '';
+  });
+
+  $('#runSubBtn').addEventListener('click', async () => {
+    const out = $('#subResult');
+    out.innerHTML = '<div class="small-muted">枚举全部方案并重算来源链/逐站核验中…</div>';
+    try {
+      const r = await api('POST', `/api/packages/${packageId}/substitutes/preview`, { substitutions: readSubEntries() });
+      renderSubResult(r, packageId, pkg);
+    } catch (err) {
+      const detail = err.details && Array.isArray(err.details.errors)
+        ? err.details.errors.map((x) => `· ${esc(x.message)}`).join('<br/>')
+        : '';
+      out.innerHTML = `<div class="errorline">${esc(errText(err))}${detail ? `<br/>${detail}` : ''}</div>`;
+    }
+  });
+}
+
+function subStopsHtml(r) {
+  return r.stops.map((st) => `
+    <div class="stop-card ${st.eligible ? 'stop-ok' : 'stop-bad'}" style="margin-top:6px">
+      <div class="section-title">${r.multiStop ? `第 ${st.position + 1} 站：` : ''}${esc(st.name)}
+        （${esc(st.medium)} / ${esc(st.region)}，${st.useFrom} → ${st.useTo}）
+        ${st.eligible ? '<span class="pill pill-ok">合格</span>'
+          : `<span class="pill pill-bad">失格 ${st.failingNodeCount} 节点</span>`}</div>
+      ${st.eligible ? `<div class="small-muted">来源链节点 ${st.nodeCount} 个，均有一份未撤销授权独自覆盖整段展期。</div>` : `
+        <table class="auth"><tr><th>节点</th><th>原因</th><th>来源路径</th></tr>
+          ${st.failingNodes.map((n) => `
+            <tr><td>${esc(n.title)} #${n.materialId}</td>
+              <td>${n.reasonText.map((t) => esc(t)).join('；')}</td>
+              <td class="small-muted">${(n.paths || []).map((p) => p.map((x) => `#${x.materialId}`).join(' → ')).join('；')}</td>
+            </tr>`).join('')}
+        </table>`}
+    </div>`).join('');
+}
+
+function renderSubResult(r, packageId, pkg) {
+  const box = $('#subResult');
+  if (!r.feasible) {
+    box.innerHTML = `
+      <div class="verdict fail">✗ 无解：${esc(r.message || '不存在全站合格的替换方案')}</div>
+      <div class="small-muted">以下为<b>当前清单（不替换）</b>的逐站缺口；包未被修改，未产生任何写入。</div>
+      ${subStopsHtml(r)}
+      <div class="small-muted">枚举方案数 ${r.consideredPlans} ｜ 依据版本 ${r.basisVersion}</div>`;
+    return;
+  }
+  box.innerHTML = `
+    <div class="verdict pass">✓ 最优方案：替换 <b>${r.replacementCount}</b> 件，全部 ${r.stopCount} 站合格
+      <span class="sub">（共枚举 ${r.consideredPlans} 种恰选方案；依据版本 ${r.basisVersion}）</span></div>
+    <table class="auth">
+      <tr><th>原顺序</th><th>原素材</th><th>选中</th><th>编号</th><th>结果</th></tr>
+      ${r.selection.map((s) => `
+        <tr>
+          <td>${s.position + 1}</td>
+          <td>${esc(s.materialTitle)} #${s.materialId}</td>
+          <td>${esc(s.selectedTitle)} #${s.selectedMaterialId}</td>
+          <td>${s.choiceIndex}</td>
+          <td>${s.replaced ? '<span class="pill pill-warn">替换</span>' : '<span class="pill pill-ok">保持</span>'}</td>
+        </tr>`).join('')}
+    </table>
+    <div class="small-muted">替换后去重清单（升序）：[${r.finalMaterialIds.join(', ')}]
+      ${r.removedByDedupe.length ? `；折叠重复位置：${r.removedByDedupe.map((d) => `第${d.position + 1}位 ${esc(d.title)}`).join('、')}` : ''}</div>
+    <div class="section-title">逐站核验结果（按替换后去重清单重算完整来源链）</div>
+    ${subStopsHtml(r)}
+    <div class="pkg-actions" style="margin-top:8px">
+      <button type="button" class="btn btn-primary" id="applySubBtn">确认并应用所选清单（同一事务）</button>
+      <span class="small-muted">确认时再次核对包仍为待发布、依据版本/清单/行程指纹未变并重算；任一不符整体拒绝。</span>
+    </div>`;
+  $('#applySubBtn').addEventListener('click', async () => {
+    if (!confirm(`确认应用该替代方案（替换 ${r.replacementCount} 件）？`)) return;
+    try {
+      const out = await api('POST', `/api/packages/${packageId}/substitutes/apply`, { applyToken: r.applyToken });
+      $('#modalBackdrop').classList.add('hidden');
+      toast(out.message);
+      await loadState();
+    } catch (err) {
+      $('#subResult').insertAdjacentHTML('beforeend',
+        `<div class="errorline" style="margin-top:8px">确认被拒绝：${esc(errText(err))}（未做任何修改，请重新预览）</div>`);
+      await loadState();
+    }
+  });
 }
 
 // ---- 变更影响预演 + 确认提交 ----

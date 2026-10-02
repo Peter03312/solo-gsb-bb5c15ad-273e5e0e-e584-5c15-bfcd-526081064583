@@ -8,6 +8,8 @@
 
 成功发布时，系统在**与发布快照同一个事务**内封存一份**可导出的签名发布凭证（attestation）**：当时的素材清单、完整来源子图、逐站行程、每个站×节点**实际采用的未撤销授权条款全文**与全部来源路径，以及核验规则版本与规则参数，并用**本机持久化 Ed25519 密钥**签名。审计人员**脱离馆内数据库**时，仅凭凭证文件与签发方公开密钥，运行随附的**零依赖独立校验程序**即可复算签名、来源链与**逐站整段覆盖**，得到逐站结论与逐项篡改原因。凭证完全自包含：授权事后修改、撤销或删除**不改变旧凭证**，已发布包转为需复核也不影响旧凭证。**密钥轮换自动保留旧公钥**；升级前的旧发布快照可申请补发，但补发只读取快照自身，**旧快照若缺少证明所需字段则明确拒绝（`422 UNSUPPORTED_SNAPSHOT`），绝不用当前授权拼凑**。
 
+策展人还可为**待发布**包编排**替代素材方案**：为包中至多 6 件入展素材分别指定 1～8 件**现有**替代素材（未指定的素材保持不变；重复编号、非包内原素材或候选不存在均**整次拒绝**）。预览对“每件原素材及其候选中**恰选一件**”的全部组合，按**替换后的去重清单**（沿原清单顺序首次出现去重）重算完整来源链与单站/多站逐站授权资格，仅**全站合格**的方案可选，并按 **替换件数最少 → 最终清单升序 → 原清单顺序的选中编号**（原素材=0，候选按提交顺序 1～8）依次打破并列。预览**只读**，返回替换明细、逐站核验结果、依据版本、原清单与行程指纹；无解时返回**当前清单**的逐站缺口、不修改包。确认在**同一事务**内核对包仍为待发布、依据版本与清单/行程指纹未变，由服务端按同一输入**重算最优方案并再次整站核验**后原子应用；过期、输入不符或重算失格均拒绝且**不部分修改**。既有核验、发布、复制与已发布包冻结规则完全兼容。
+
 - 后端：Node.js 20 + Express + better-sqlite3（SQLite，同步事务）
 - 前端：原生 HTML/CSS/JS，无构建步骤
 - 交付：Dockerfile + docker-compose 一键启动，数据库自动初始化
@@ -79,6 +81,9 @@ node test/e2e.js
    - 点「**授权报价预览**」（待发布 / 需复核包的表单按钮，或包卡片上的同名按钮）：
      - 在弹层中逐行录入拟取得的报价（素材/媒介/地区/起止日/非负整数成本），点「求最低成本组合」；页面展示最优方案（总成本、所选报价及每项覆盖的站×节点、逐站逐节点的现有授权/所选报价依据、未选用报价），或无解时按站列出缺口节点、各项报价失配原因与来源路径，并可一键把缺口站参数带入新报价行继续试算。
      - 预览纯只读，关闭弹层即结束；已发布包按钮不出现（接口同样拒绝）。
+   - 点「**替代素材方案**」（仅待发布包卡片上的按钮）：
+     - 在弹层中至多为 6 件包内原素材逐组挑选 1～8 件现有候选（可增删组、增删候选；编号即候选顺序），点「枚举并预览最优方案」；页面展示替换明细、替换后去重清单、逐站核验结果与并列裁决依据，或无解时展示当前清单逐站缺口。
+     - 预览只读；点「确认并应用所选清单」才在同一事务内核版本/双指纹、重算并原子替换清单（包仍为待发布，行程与状态不变）；过期或漂移会提示重新预览。
    - 点「按此次核验结果原子发布」：
      - 服务端在**单个事务内重新读取并重算**——多站包会重读**完整行程（`package_stops`）、素材清单与授权依据**，逐站重算；任一不符或任一站不合格都整体回滚，**整包不发布**。
      - 核验之后授权或来源关系被任何人修改过，返回 `409 STALE_BASIS`，拒绝发布并提示重新核验；
@@ -162,6 +167,7 @@ node test/e2e.js
 | 行程冻结 | 多站行程仅待发布可改；`package_stops` 上的 `BEFORE UPDATE/DELETE` 触发器拒绝改动非待发布包的站次 |
 | 发布闸门 | 无全局错误、无缺失素材、无环、无不合格节点（多站：全部站全部节点），且依据版本未过期 |
 | 报价组合预览 | 只读，不写入任何数据；每站每节点须由一份现有授权或一份所选报价独自覆盖整段展期；同站不可拼接短授权/短报价；共享节点（含跨站）一份报价只计一次；最优=总成本最低→报价数少→输入序号序列字典序最小；已发布包不可预览 |
+| 替代素材方案 | 仅待发布包；至多 6 件原素材各带 1～8 件现有候选，重复编号/非包内原素材/不存在候选整次拒绝；恰选一件、按替换后去重清单重算完整来源链与逐站资格；仅全站合格方案可选，替换件数最少→最终清单升序→原顺序选中编号；预览只读；确认同事务核对状态/依据版本/双指纹并重算，任一不符整体拒绝 |
 
 不可变性由数据库强制：`verification_snapshots` 表与多站包发布后的 `package_stops` 行上配置了 `BEFORE UPDATE` / `BEFORE DELETE` 触发器，任何修改或删除都会被 SQLite 直接拒绝。
 
@@ -202,6 +208,8 @@ node test/e2e.js
 | `POST /api/changes/preview` | **变更影响预演**（只读）：单笔授权增改撤删 / 单条来源增删，返回将由合格转不合格的已发布包、问题节点、原因与依据版本 |
 | `POST /api/changes/commit` | **确认提交同一操作 + 预演结果**：事务内核版本、重算并比对影响清单；过期/不一致/目标失效/非法均整体拒绝 |
 | `POST /api/packages/:id/quotes/preview` | **授权报价组合预览（只读）**：求总成本最低的报价组合覆盖全部站次全部来源节点；无解列出站次/节点/来源路径缺口；不写入任何数据；已发布包 `409 PACKAGE_PUBLISHED` |
+| `POST /api/packages/:id/substitutes/preview` | **替代素材方案预览（只读）**：至多 6 件包内原素材各带 1～8 件现有候选，枚举恰选一件的全部组合，取替换最少→最终清单升序→原顺序选中编号的全站合格最优方案；无解返回当前清单逐站缺口 |
+| `POST /api/packages/:id/substitutes/apply` | **确认应用替代方案**：同一事务内核对待发布状态、依据版本、清单/行程指纹并重算最优方案；过期/输入不符/重算失格均整体拒绝，不部分修改 |
 | `GET /api/snapshots/:id` | 读取不可变快照完整内容 |
 
 ### 多站巡展 API 调用示例
@@ -464,6 +472,104 @@ curl -s -X POST http://localhost:3000/api/packages/12/quotes/preview \
 
 > 报价预览完全只读：调用前后 `/api/state` 的 `basisVersion` 与授权数量不变，包状态与快照表均无变化；报价不会变成真实授权，后续仍由策展人按现有「授权登记 → 核验 → 发布」流程执行。
 
+### 替代素材方案：只读预览 / 事务确认（仅待发布包）
+
+策展人可为**待发布**包中至多 **6** 件入展素材分别指定 **1～8** 件**现有**替代素材。每组语义为“这件原素材及其候选中**恰选一件**”（选编号 0＝保持原素材，编号 1..8＝选该顺位候选）；未出现在请求里的原素材一律保持不变。
+
+- **整次拒绝（`400 INVALID_SUBSTITUTIONS`，逐组列出全部问题，不做任何修改）**：
+  - 同一原素材 `materialId` 出现多组（**重复编号**）；
+  - `materialId` 不在当前包入展清单内（**非包内原素材**）；
+  - 候选 `candidateIds` 为空、少于 1 或多于 8 件、含非正整数、含不存在素材、含原素材自身、或同组内候选重复（**不存在的候选 / 重复编号**）。
+  - 不同组之间候选允许相同（重复由“替换后去重清单”自然折叠）。
+- **预览只读重算**：对全部“恰选一件”组合（保持不变也视为方案之一），把每件原素材替换为所选素材后，**沿原清单顺序首次出现去重**，再以去重清单（id 升序）为入展根集合重算**完整来源闭包**与**单站或多站逐站**授权资格——规则与既有核验完全一致（`*` 通配、忽略大小写、闭区间独自覆盖、同站短授权不可拼接）。
+- **方案可选条件**：全部站点的全部来源节点合格（多站须**每一站**都合格）。
+- **并列裁决（确定性、唯一最优）**：① 替换件数最少（只有“原素材→候选”计替换；去重折叠不计额外替换）；② 替换后最终去重清单（id 升序）字典序最小；③ 原清单顺序上各可替换槽位选中编号序列（0/1..8）字典序最小。
+- **无解**：`feasible:false`，不下发确认令牌，返回**当前清单（不替换）**的完整逐站核验 `current` 与按站缺口（失格节点、原因、全部来源路径），**不修改包**。
+- 预览返回：替换明细（`selection`/`replacements`/`removedByDedupe`）、`verification` 完整核验结果与 `stops` 逐站结论、`basisVersion`、`originalListFingerprint`、`itineraryFingerprint`、裁决依据 `tieBreak`、枚举方案数 `consideredPlans`，以及一次性的 `applyToken`。
+- **确认**在**单个事务**内：校验令牌完整性 → 包仍为 `draft` → `basisVersion` 未变 → 清单指纹与行程指纹均未变 → 令牌内嵌规格仍通过同一套输入校验且选中素材仍存在 → **服务端按同一规格重算最优方案并与令牌逐项比对** → 对最终去重清单再做一次权威整站核验 → 全部通过才原子重写清单（不动行程、状态与快照；包仍为待发布，随后照常「核验 → 发布」）。任一不符整体回滚。
+
+第 1 步——预览（`substitutions` 数组；空数组 `[]` 表示本轮不替换任何素材）：
+
+```bash
+curl -s -X POST http://localhost:3000/api/packages/2/substitutes/preview \
+  -H 'Content-Type: application/json' \
+  -d '{ "substitutions": [
+    { "materialId": 1, "candidateIds": [22, 24] }
+  ]}'
+# → 200 {
+#   "ok": true, "feasible": true, "mutated": false,
+#   "packageId": 2, "multiStop": false, "stopCount": 1,
+#   "basisVersion": 10, "consideredPlans": 3,
+#   "originalMaterialIds": [1],
+#   "originalListFingerprint": "5345…", "itineraryFingerprint": "569b…",
+#   "replacementCount": 1,
+#   "finalMaterialIds": [24],
+#   "selection": [
+#     { "position": 0, "materialId": 1, "materialTitle": "展馆宣传片《城脉》成片",
+#       "choiceIndex": 2, "selectedMaterialId": 24, "selectedTitle": "干净替代成片《秋脉》",
+#       "replaced": true } ],
+#   "replacements": [ { "position": 0, "choiceIndex": 2,
+#       "from": {"materialId":1,"title":"…"}, "to": {"materialId":24,"title":"…"} } ],
+#   "removedByDedupe": [],
+#   "tieBreak": { "first": "replacementCount",
+#     "then": ["finalMaterialIdsAsc","choiceSequenceInOriginalOrder"],
+#     "replacementCount": 1, "finalMaterialIds": [24], "choiceSequence": [2] },
+#   "verification": { …替换后清单的完整核验结果（与 /api/verify 同构）… },
+#   "stops": [ { "position": 0, "eligible": true, "nodeCount": 2, "failingNodeCount": 0 } ],
+#   "applyToken": { "packageId": 2, "basisVersion": 10, "listFingerprint": "…",
+#                   "itineraryFingerprint": "…", "substitutions": [ … ], "selection": [ … ],
+#                   "finalMaterialIds": [24], "replacementCount": 1 } }
+```
+
+第 2 步——把预览返回的 `applyToken` **原样**回传确认（同一事务重算后原子应用）：
+
+```bash
+curl -s -X POST http://localhost:3000/api/packages/2/substitutes/apply \
+  -H 'Content-Type: application/json' \
+  -d '{ "applyToken": { /* 原样粘贴 preview 返回的 applyToken */ } }'
+# → 200 { "ok": true, "mutated": true, "replacementCount": 1,
+#         "finalMaterialIds": [24], "basisVersion": 10,
+#         "package": { …更新后的待发布包 DTO（items 已为替换后去重清单）… },
+#         "result": { …应用后整站重算结果… }, "stops": [ …逐站结论… ] }
+```
+
+多站包用法相同：逐站结果在 `stops[]` 按站给出，方案必须**每一站**都合格；确认只替换清单，冻结前的多站行程（`package_stops`）原样保留。当前清单已全站合格时，允许传空 `substitutions` 或让“保持不变”参与裁决——此时最优方案替换件数为 0，确认不会改动清单。
+
+无解示例（当前清单本身在秋季失格，候选也无法补齐）：
+
+```jsonc
+// POST /api/packages/2/substitutes/preview  { "substitutions": [ { "materialId": 1, "candidateIds": [22] } ] }
+{ "feasible": false, "consideredPlans": 2, "mutated": false,
+  "current": { …当前清单 [1] 的完整核验：eligible=false… },
+  "stops": [ { "position": 0, "eligible": false, "failingNodeCount": 1,
+    "failingNodes": [ { "materialId": 5, "reasons": ["date"],
+      "reasonText": ["授权有效期不覆盖整段使用期"],
+      "paths": [ [ {"materialId":1}, {"materialId":3}, {"materialId":5} ] ] } ] } ]
+  // 注意：无 applyToken；包与任何数据均未改动
+}
+```
+
+拒绝码（均为 4xx，且不产生任何写入）：
+
+```text
+400  INVALID_SUBSTITUTIONS  substitutions 缺失/非数组、超过 6 组；原素材重复编号或不在包内；
+                            候选为空 / 超过 8 件 / 同组重复 / 含原素材自身 / 引用不存在素材
+                            （details.errors 逐组列出 field 与 message，整次拒绝）
+400  EMPTY_PACKAGE          包没有任何入展素材
+400  INVALID_PACKAGE / INVALID_STOPS   单站参数或多站行程自身非法
+409  NOT_DRAFT              包已发布 / 需复核（清单已冻结；请先「复制为待发布包」）
+409  STOPS_OVERLAP          多站行程存在站间重叠
+409  STALE_BASIS            预览后授权或来源关系被增删改（依据版本变化；details.clientBasis/currentBasis）
+409  PACKAGE_CHANGED        预览后清单被修改（或令牌重复使用）
+409  ITINERARY_CHANGED      预览后单站参数或多站行程被修改
+409  TOKEN_MISMATCH         确认令牌缺失、损坏或不属于该包
+409  INPUT_MISMATCH         令牌方案与服务端按当前数据重算的最优方案不一致（篡改/漂移）
+422  RECOMPUTE_DISQUALIFIED 重算最优方案缺失或最终清单重算未达全站合格
+404  展览包不存在
+```
+
+> 与既有规则的兼容：替代确认只重写**待发布**包的 `package_items`（不触碰授权、来源关系、`package_stops`、快照与依据版本）；已发布 / 需复核包的冻结规则、发布闸门、失败发布留痕、复制为待发布包、档期与报价预览等既有行为均不变。应用成功后旧的 `applyToken` 立即作废（清单指纹已变），需要再次调整请重新预览。
+
 ## 八、发布凭证：签发、导出与离线独立校验
 
 发布成功（单站或多站）时，服务端在**写入不可变发布快照、置为已发布的同一个 SQLite 事务内**，同时封存一份自包含、可导出的签名凭证（`publish_attestations` 表，与快照表一样有 UPDATE/DELETE 拒绝触发器）。
@@ -591,6 +697,7 @@ details.missingFields = ["…nodes[materialId=…].paths", "…matchedAuthorizat
 │   ├── schedule.js         # 档期规划（仅单站；多站包明确拒绝）：起始日折算/交集/合并、事务内重验改期
 │   ├── changes.js          # 单笔变更影响预演（回滚型事务模拟）与确认提交（多站影响按站给出）
 │   ├── quotes.js           # 授权报价组合预览（只读）：报价校验、逐站缺口、精确最低成本集合覆盖求解
+│   ├── substitutes.js      # 替代素材方案（只读预览 + 事务确认）：候选校验、去重重算、枚举三级裁决、双指纹并发防护
 │   ├── server.js           # Express API（发布同事务封存凭证、凭证导出/补发、密钥轮换等）
 │   └── seed.js             # 演示数据
 ├── scripts
@@ -600,5 +707,5 @@ details.missingFields = ["…nodes[materialId=…].paths", "…matchedAuthorizat
 │   ├── index.html
 │   ├── styles.css
 │   └── app.js
-└── test/e2e.js             # 端到端业务规则自检（220 项，含多站巡展、授权报价预览、发布凭证签发与离线校验）
+└── test/e2e.js             # 端到端业务规则自检（274 项，含多站巡展、授权报价预览、替代素材方案、发布凭证签发与离线校验）
 ```
